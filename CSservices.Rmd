@@ -1,0 +1,1036 @@
+---
+title: "Confidence level in various social services"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-04-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list = ls())
+set.seed(32508956) # Your Student Number
+VCData = read.csv("WVSExtract.csv")
+VC = VCData[sample(1:nrow(VCData),50000, replace=FALSE),]
+VC = VC[,c(1:6, sort(sample(7:46,17, replace = FALSE)), 47:53, sort(sample(54:69,10, replace = FALSE)))]
+```
+1. Describe the Data Overall.
+From checking the dimensions of VC, there are 50000 rows, each row having 40 variables.(As shown below). Using the head function to quickly inspect the VC data, it comes as no surprise that all columns (excluding the first column that indicates the country) contain numerical values as it aligns with the information from https://www.worldvaluessurvey.org/WVSDocumentationWV7.jsp 
+```{r}
+dim(VC)
+```
+```{r}
+head(VC)
+```
+
+```{R}
+VC_no_country <- VC[2:40]
+ranges <- sapply(VC_no_country, function(x) max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+ranges_df <- data.frame(Variable = names(ranges), Range = as.numeric(ranges))
+print(ranges_df)
+```
+In terms of missing values, there are none (as shown below)
+```{R}
+anyNA(VC) #outputs false if there are no negative values
+```
+However, rather than missing values, there are negative values. For the purpose of analysis, I will choose to handle negative values by marking them as NA. This way we do not assign meaning or let negative values skew our analysis (i.e when trying to find the mean or median). This decision was made instead of completely removing rows with negative values because doing so would not only remove negative values, but also remove valid values in other columns that could have been used for analysis.
+```{R}
+# Replace all negative values in numeric columns with NA
+#if column is numeric, then if column value is <0 replace with NA
+VC[] <- lapply(VC, function(col) {
+  if (is.numeric(col)) {
+    col[col < 0] <- NA
+  }
+  return(col)
+})
+
+```
+To explore the distribution of each variable visually, I start off with a box plot for every column in VC. In this process, I removed the age column since, as shown above, it has a range of 105 which would skew the visualisation since all other columns have a range under 15. Similarly, I removed the age column since the values were not numerical and therefore would not be applicable in a boxplot.
+```{R}
+VC_no_country <- VC[2:40]
+VC_no_age <- VC_no_country[, !names(VC_no_country) %in% "Age"]
+boxplot(VC_no_age, main="Boxplot of VC Data (excluding Age and Country)", col="lightblue", las=2)
+```
+From the above box plot, all columns (excluding country and age) have values lying in the range -5 to 10 and have similar medians. Columns like PIAB, STFaith, STRight, STWorld, PDDemImp however are more negatively skewed compared to the other (i.e more values on the higher end). 
+
+2a.
+```{R}
+PER <- VC[VC[["Country"]] == "PER", ] #the VC dataset for just PERU
+OTHER<- VC[VC[["Country"]] != "PER", ] #the VC dataset without PERU i.e the rest of the countries
+```
+```{R}
+
+PER_no_country = PER[2:40] #remove country
+PER_no_age <- PER_no_country[, !names(PER_no_country) %in% "Age"] #remove age
+#boxplot(PER_no_age, main="Boxplot of Peru attributes", col="lightblue", las=2)
+nrow(PER_no_age)
+```
+```{R}
+OTHER_no_country = OTHER[2:40] #remove country
+OTHER_no_age <- OTHER_no_country[, !names(OTHER_no_country) %in% "Age"] #remove age
+#boxplot(OTHER_no_age, main="Boxplot of Other attributes", col="lightblue", las=2)
+nrow(OTHER_no_age)
+```
+As the lecturer mentioned, for 2a, there is not a huge variety of ways in which you can compare attributes themselves. One comparison that he does in fact mention is the number of responses, i.e how many responses did my focus country give. So I will start with this approach. As shown above, if we are comparing my focus country Peru with the other countries as a group, the number of responses is 755 and 49245 respectively. It is apparent that the accuracy of my later analysis will be more accurate for the other countries as a group compared to just Peru solely due to the number of responses available to analyse.
+
+Another interesting point of comparison however is the distribution of the responses themselves. By comparing the mean of each attribute between Peru and other countries as a group we can compare the average responses between Peru and other countries for each attribute:
+```{R}
+VC$group <- ifelse(VC$Country == "PER", "Focus Country", "Other Countries")
+num_vars <- ncol(VC) - 10  # exclude the last 10 columns
+
+library(dplyr)
+library(tidyr)
+
+means_by_group <- VC %>%
+  # Replace ALL negative values in the dataframe with NA
+  mutate(across(everything(), ~ ifelse(.x < 0, NA, .x))) %>%
+  group_by(group) %>%
+  summarise(across(2:num_vars, ~ mean(.x, na.rm = TRUE))) %>%
+  pivot_longer(-group, names_to = "Variable", values_to = "Mean") %>%
+  pivot_wider(names_from = group, values_from = Mean)
+
+# Add difference column and sort
+means_by_group_sorted <- means_by_group %>%
+  mutate(Difference = `Focus Country` - `Other Countries`) %>%
+  arrange(desc(Difference))
+
+print(means_by_group_sorted)
+
+```
+In the above table, we can now clearly see which attributes differ the most between Peru and the other countries as a group by comparing the average responses. Interestingly, 2 out of the top 3 differences relate to science and technology. On average, participants from Peru believe that: 
+1. We depend too much on science and not enough on faith and 
+2. One of the bad effects of science is that it breaks down people’s ideas of right and wrong.
+more so than the other countries do as a group. 
+This suggests that Peru holds stronger religious beliefs OR has a higher proportion compared to other countries. (Perhaps if my subset of data had contained the VReligious attribute this observation would have been clearer. This will be an interesting discussion later on.)
+2b. To determine which attributes better predict confidence in social organisations, a multiple linear regression will be used first.
+We will analyse all social organisations, starting with Religious Institutions
+```{R}
+target_col <- "CReligious"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+library(ggplot2)
+
+
+#Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CReligious (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+As shown in the above graphic,the following attributes are the best predictors for confidence in Religious institutions (filtered by p value less than 0.15, followed by coefficient size):
+1. Trust in family
+2. How secure one feels in their neighbourhood
+3. How frequently one uses the radio as their source of information
+4. Education Level
+5. Agreement that private ownership of business and industry should be increased vs government ownership.
+A repeating theme here is trust (since in 2a, it was shown that Peru on average had higher trust in people they knew, meet for the first time, and people from their neighbourhood.) However, it seems strange that TKnow (trust in people you know personally) is not included despite TFamily being a stronger predictor. The Rsquared value however is quite low at 3%, indicating that this model does not represent the relationships particularly well. 
+
+```{R}
+target_col <- "CPress"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CPress (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+As shown in the above graphic,the following attributes are the best predictors for confidence in Press (filtered by p value less than 0.1, followed by coefficient size):
+1. TNeighbourhood
+2. SSecure
+3. VPolitics
+4. STFaith
+5. STOpportunity (Negative correlation)
+Again, trust has been a recurring theme. This time however, TNeighbourhood has been featured as the highest predictor (in terms of coefficient size). 
+Other attributes to predict CPress are TNeighbourhood and SSecure as their coefficients are significantly larger than the rest of the attributes. Additionally, the graph suggests that the more value politics holds (for an individual), the more confidence in press an individual will have. Now, realistically this can easily be affected by confirmation bias. For instance, if someone holds the same views as the press, they will more often than not agree with the press, thus increasing their confidence in the press. 
+Since a higher interest in politics relates to a higher confidence in the press, perhaps the vast majority of the Peru hold the same political view. This would mean that the press would be more likely to agree with the public, thus pushing this 'confirmation bias' notion. 
+If political views were more scattered rather than unified in Peru, then among those who value politics may not agree with the press as often.
+Of course, these are only interesting speculations and to be analysed later on. These observations are not incredibly substantial as the Rsquared values are quite low (9%)
+```{R}
+target_col <- "CPolice"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CPolice (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+The graphic shows the most significant predictors of CPolice:
+1. SSecure
+2. TKnow
+3. TNeighbourhood
+4. VPolitics
+5. STOpportunity
+Attributes SSecure and TKnow more reliably predicts CPolice due to its significantly lower p values.
+The same argument that was made for TMeet and CPress can be made here. That is, the more one trusts someone they meet for the first time, the more likely they will trust someone that is from the Police that they meet for the first time. It is becoming seemingly clear that trust in general is a strong predictor for confidence. HOWEVER, this can also be due to the fact that individuals from Peru trust more on average as expressed in 2a (Although the difference in trust between Peru and the other countries is only 0.18, so this is not too strong of an argument and will be made clearer when comparing significant predictors for other countries as a group in 2c.)
+```{R}
+target_col <- "CPParties"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CPParties (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+VPolitics has the highest coefficient so far compared to our previous analysis and suggest that it is the strongest predictor of CPParties. With a lower p value, TPeople can reliably predict confidence in Political parties. Evidently shown above, other reliable predictors are:
+1. PFriends
+2. TNeighbourhood
+With an R squared value of 0.16, this model ranks the highest thus far in terms of predictive accuracy.
+```{R}
+target_col <- "CCivilService"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CCivilService (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+```
+The coefficient for TKnow is the highest we've seen so far when comparing the graphics for previous social organisations. With its p value appearing low, TKnow is a strong and reliable predictor for CCivilService. Similarly TMeet is the next highest significant predictor of CCivilService, following the overall theme of trust being a predictor for confidence. The top 2 most significant predictors are as follows:
+1. TPeople
+2. TMeet
+3. PTelevision (Negative correlation)
+4. VLeisure (Negative correlation)
+5. STOpportunity (Negative correlation)
+While the rest of the attributes above have a negative regression coefficient, indicating a negative relationship between those attributes and confidence in CCivilService.
+Since PTelevision has a negative coefficient, an inverse relationship with CCivil Service is assumed. That is, the less frequently one uses television as their source of information, the less confidence they have in Civil Service. (Since Ptelevision is ranged 1-5, 1 meaning used daily and 5 meaning never used as a source of information)
+In this model, I choose to remove the PIA attribute from consideration as although it appears in the top 5, it is a categorical attribute rather than a numerical attribute. (However it is still in the graphic for visual purposes.)
+With an Rsquared value of 0.138, this model ranks as 2nd thus far in terms of predictive accuracy.
+```{R}
+target_col <- "CUniversities"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CUniversities (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+The top 3 best predictors for CUniversities include:
+1. VWork
+2. TKnow
+3. SSecure
+The highest predictor being VWork does not come as a surprise, logically speaking those that attend university do so in hopes of attaining a job.
+```{R}
+target_col <- "CElections"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+#  Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CElections (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+```
+Confidence in Elections is best predicted with the following attributes:
+1. SSecure
+2. HHealth (negative correlation)
+3. VPolitics 
+4. STOpportunity (negative correlation)
+5. STWorld(negative correlation)
+Note that the HHealth attribute is negatively correlated with CElections as it has a negative coefficient. Vpolitics ranking in the top 3 prediction attributes is not a surprise. What is interesting about this however is that those who value politics more tend to have more confidence in elections. This may suggest that among those who value politics, a larger proportion of these people have had election outcomes in their favour, which could increase their confidence in elections overall.
+```{R}
+target_col <- "CMajCompanies"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.1) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+# Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CMajCompanies (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+```
+Top predictors of confidence major companies are:
+1. VWork
+2. Edu
+3. PRadio
+The Education attribute having a negative correlation with CMajCompanies comes as a surprise. Particularly because in the CUniversity graphic, VWork was the highest predictive attribute. The R squared value is quite low for this model, at an 8.5%.
+```{R}
+target_col <- "CBanks"
+
+# Replace all negative values in numeric columns with NA
+PER_cleaned <- PER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Prepare formula with all 28 attributes
+attribute_names <- names(PER_cleaned)[1:28]
+formula <- as.formula(paste(target_col, "~", paste(attribute_names, collapse = " + ")))
+
+# Fit the multiple linear regression model
+model <- lm(formula, data = PER_cleaned)
+model_summary <- summary(model)
+
+# Extract coefficients (excluding intercept)
+coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+rownames(coeffs) <- NULL
+
+# Add R² and Adjusted R² from overall model to each row
+coeffs$R2 <- model_summary$r.squared
+coeffs$Adj_R2 <- model_summary$adj.r.squared
+
+# Rename columns for clarity
+colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+
+# Filter for significance and select top 10 predictors by abs(Estimate)
+top10_filtered <- coeffs %>%
+  filter(pValue < 0.05) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+#  Plot: color by p-value, label with R²
+ggplot(top10_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  annotate("text", x = Inf, y = Inf,
+           label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                          "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+           hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Predictors of CBanks (Multiple Regression)",
+    x = "Attribute",
+    y = "Regression Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = c(min(top10_filtered$Estimate) * 1.2,
+                      max(top10_filtered$Estimate) * 1.2))
+
+
+```
+The top predictive attributes for CBanks are as follows:
+1. SSecure
+2. PTelevision (Negative Correlation)
+3. ERadio
+It is surprising that HSatFin does not place in the top 3 attributes. One would expect to have more confidence in banks if they themselves felt financially satisfied. Instead, it seems that where they get their source of information from may have an affect on their confidence in Banks, as 2 out of the top 3 attributes have to do with the frequency of which one uses Television of Radios. 
+The fact that using televisions less suggest less confidence in banks while the opposite can be said for Radios seems contradicting to say.
+2b. 
+```{R}
+library(dplyr)
+library(ggplot2)
+
+# Replace all negative values in numeric columns with NA
+OTHER_cleaned <- OTHER_no_age %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Use all 28 predictors
+predictor_cols <- names(OTHER_cleaned)[1:28]
+
+# Get the last 10 columns (target variables)
+target_cols <- names(OTHER_cleaned)[(ncol(OTHER_cleaned) - 9):ncol(OTHER_cleaned)]
+
+# Loop through each target and generate plot
+for (target_col in target_cols) {
+  
+  # Create regression formula
+  formula <- as.formula(paste(target_col, "~", paste(predictor_cols, collapse = " + ")))
+  
+  # Fit multiple regression model
+  model <- lm(formula, data = OTHER_cleaned)
+  model_summary <- summary(model)
+  
+  # Extract coefficients (excluding intercept)
+  coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+  coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+  rownames(coeffs) <- NULL
+  
+  # Add R² and Adjusted R² to each row (same for all)
+  coeffs$R2 <- model_summary$r.squared
+  coeffs$Adj_R2 <- model_summary$adj.r.squared
+  
+  # Rename columns for consistency
+  colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+  
+  # Filter significant predictors and sort by effect size
+  top_filtered <- coeffs %>%
+    filter(pValue < 0.1) %>%
+    arrange(desc(abs(Estimate))) %>%
+    head(10)
+  
+  # Skip if no significant predictors found
+  if (nrow(top_filtered) == 0) {
+    message("No significant predictors for ", target_col)
+    next
+  }
+
+  # Plot
+  plot <- ggplot(top_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+    geom_col(show.legend = TRUE) +
+    annotate("text", x = Inf, y = Inf,
+             label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                            "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+             hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+    coord_flip() +
+    labs(
+      title = paste("Top Predictors of", target_col),
+      x = "Attribute",
+      y = "Regression Coefficient",
+      fill = "p-value"
+    ) +
+    scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(face = "bold")) +
+    expand_limits(y = c(min(top_filtered$Estimate) * 1.2,
+                        max(top_filtered$Estimate) * 1.2))
+  
+  print(plot)  
+}
+
+```
+2c.
+In the same nature as 2b, to find the strongest predictors, I first filtered the p-value by <0.1, followed by finding the largest regression coefficient, all determined using multiple linear regression on all attribute columns. This way I could avoid the limits of just performing simple linear regression one attribute at a time as well as increase the predictive ability of my model (R squared value) because it factors in relationships between multiple attributes.
+One of the biggest differences between all Peru vs Other Countries' models is much lower p values across all social organisations, as well as a higher average R squared value across all models. This is due to having a much larger data set to fit our model on (49245 observations vs 755 observations for my focus country.)
+
+I will compare the models for Social organisations with the highest R squared values (For Peru), Starting with Confidence Political Parties. The reason I do this is because lower r squared models mean less predictive accuracy, and results from such models hold less substance compared to higher r squared models.
+
+The top predictive attributes are:
+1. VPolitics
+2. TPeople
+3. TNeighbourhood
+4. TMeet 
+5. SSecure
+
+As opposed to the top predictive attributes for Peru:
+1. VPolitics
+2. TNeighbourhood
+3. PFriends
+4. SSecure
+5. HMedicine
+
+Attributes in common are VPolitics, in fact they share first place in both comparisons. The rest are TNeighbourhood, and SSecure. So far, there have been a few similar attributes in Peru and Other Countries in the models we have compared. 
+
+The third social organisation of interest with an R squared value of 18.2% and all p values less than 0.0002 is CCivilService. 
+For the other countries as a group, the top predictive attributes are
+1. TNeighbourhood
+2. VPolitics
+3. TPeople
+4. SSecure
+5. TFamily
+
+In comparison with Peru:
+1. TPeople
+2. TMeet
+3. PTelevision (Negative correlation)
+4. VLeisure (Negative correlation)
+5. STOpportunity (Negative correlation)
+
+For a change, lets compare models where the other countries model had the highest R squared value:
+The top predictive attributes (by regression coefficient) for CElections are:
+1. VPolitics
+2. TPeople
+3. TNeighbourhood
+4. SSecure
+5. PSatisfied (Negative correlation)
+With an R squared value of 22.8% and all p values less than 1.0e-12 (For Other Countries), these attributes are reliable.
+3a.
+For the purpose of clustering I will remove categorical attributes PIA and MF.
+```{R}
+PER_cleaned_ <- PER_cleaned[, !(names(PER_cleaned) %in% c("PIA", "MF"))]
+OTHER_cleaned_<- OTHER_cleaned[, !(names(OTHER_cleaned) %in% c("PIA", "MF"))]
+```
+To chose the most similar countries to Peru, I utlised data from the worldwide governance indicators. Specifically, I compared the estimate values for each indicator that range between -2.5 (weak) to 2.5 (strong) and selected countries that held the same/similar values for the 6 indicators. The methodology that I used was for each country, I used each indicator as an entry to a vector eg (a,b,c,d,e,f), and computed the euclidean distance between all countries' vector with Peru's vector. The top 5 countries that are closest to Peru's are then chosen. Note that I chose to do this with the most recent year's (from 2023) survey.
+The resultant countries from this method are:
+Colombia
+Phillipines
+Mexico
+Brazil
+Kenya
+The indicators used for this were:
+Voice and accountability
+Political Stability and Absence of Violence/Terrorism
+Government Effectiveness
+Regulatory Quality
+Rule of Law
+Control of Corruption
+
+I feel as though these indicators are relevant in choosing similar countries, particularly for the survey data set because they are quite related to how one would think about social organisations in their own countries. The processed data from the wgi survey is named wgi_wide.
+```{R}
+# Load data
+wgi <- read.csv("wgidataset(Sheet1).csv")
+
+# Get unique country codes from VC
+unique_country_codes <- VC %>% distinct(Country)
+country_vec <- unique_country_codes$Country  # match case with VC column
+
+# Filter by country and year
+wgi_filtered <- wgi %>%
+  filter(code %in% country_vec) %>%
+  filter(year == 2023)  # most recent observations
+
+# Keep only needed columns
+wgi_filtered <- wgi_filtered[, c("code", "year", "indicator", "estimate")]
+
+# Pivot wider to reshape
+library(tidyr)
+wgi_wide <- wgi_filtered %>%
+  pivot_wider(
+    names_from = indicator,
+    values_from = estimate
+  )
+#finished creation of dataset!
+```
+```{R}
+ # Step 1: Extract relevant data
+# Get the last 6 columns (governance indicators)
+indicator_cols <- wgi_wide[, (ncol(wgi_wide) - 5):ncol(wgi_wide)]
+
+# Combine with country codes
+wgi_matrix <- cbind(code = wgi_wide$code, indicator_cols)
+
+# Step 2: Ensure numeric format (if needed)
+wgi_matrix[, -1] <- lapply(wgi_matrix[, -1], as.numeric)
+
+# Step 3: Get the vector for Peru
+peru_vector <- wgi_matrix[wgi_matrix[, "code"] == "PER", -1] |> as.numeric()
+
+# Step 4: Compute Euclidean distance to every other country
+distances <- apply(wgi_matrix[, -1], 1, function(x) sqrt(sum((x - peru_vector)^2, na.rm = TRUE)))
+
+# Step 5: Create a result table (exclude PER itself)
+wgi_matrix$distance <- distances
+similar_countries <- wgi_matrix[wgi_matrix$code != "PER", ] %>%
+  arrange(distance) %>%
+  head(5)
+
+# Step 6: Output the result table
+library(knitr)
+kable(similar_countries[, c("code", "distance")],
+      col.names = c("Country Code", "Euclidean Distance"),
+      caption = "Top 5 Countries Most Similar to Peru (Based on Governance Indicators)")
+print(kable)
+```
+One improvement to this method was to normalise/scale ALL the attributes. I chose not to do this because I was only interested in the attributes with the same range (-5 to 5) as the other attributes (eg PIA, MF) were categorical attributes that I prioritised less than the numerical attributes.
+3b.
+```{R}
+Cluster <- OTHER %>%
+  filter(Country %in% c("COL", "PHL", "MEX", "BRA", "KEN"))
+Cluster <- Cluster %>%
+  select(-Age)
+Cluster <- Cluster %>%
+  select(-Country)
+# Replace all negative values in numeric columns with NA
+Cluster <- Cluster %>%
+  mutate(across(where(is.numeric), ~ ifelse(.x < 0, NA, .x)))
+
+# Use all 28 predictors
+predictor_cols <- names(Cluster)[1:28]
+
+# Get the last 10 columns (target variables)
+target_cols <- names(Cluster)[(ncol(Cluster) - 9):ncol(Cluster)]
+
+# Loop through each target and generate plot
+for (target_col in target_cols) {
+  
+  # Create regression formula
+  formula <- as.formula(paste(target_col, "~", paste(predictor_cols, collapse = " + ")))
+  
+  # Fit multiple regression model
+  model <- lm(formula, data = Cluster)
+  model_summary <- summary(model)
+  
+  # Extract coefficients (excluding intercept)
+  coeffs <- as.data.frame(model_summary$coefficients[-1, ])
+  coeffs$Attribute <- rownames(model_summary$coefficients)[-1]
+  rownames(coeffs) <- NULL
+  
+  # Add R² and Adjusted R² to each row (same for all)
+  coeffs$R2 <- model_summary$r.squared
+  coeffs$Adj_R2 <- model_summary$adj.r.squared
+  
+  # Rename columns for consistency
+  colnames(coeffs) <- c("Estimate", "StdError", "tValue", "pValue", "Attribute", "R2", "Adj_R2")
+  
+  # Filter significant predictors and sort by effect size
+  top_filtered <- coeffs %>%
+    filter(pValue < 0.1) %>%
+    arrange(desc(abs(Estimate))) %>%
+    head(10)
+  
+  # Skip if no significant predictors found
+  if (nrow(top_filtered) == 0) {
+    message("No significant predictors for ", target_col)
+    next
+  }
+
+  # Plot
+  plot <- ggplot(top_filtered, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+    geom_col(show.legend = TRUE) +
+    annotate("text", x = Inf, y = Inf,
+             label = paste0("R² = ", signif(model_summary$r.squared, 3), 
+                            "\nAdj R² = ", signif(model_summary$adj.r.squared, 3)),
+             hjust = 1.1, vjust = 1.5, size = 4.5, fontface = "italic") +
+    coord_flip() +
+    labs(
+      title = paste("Top Predictors of", target_col),
+      x = "Attribute",
+      y = "Regression Coefficient",
+      fill = "p-value"
+    ) +
+    scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(face = "bold")) +
+    expand_limits(y = c(min(top_filtered$Estimate) * 1.2,
+                        max(top_filtered$Estimate) * 1.2))
+  
+  print(plot)  
+}
+```
+Again in the interest of time and space, I will only compare confidence in social organisations where the model for that specific organisation has the highest R squared models in Peru. I choose to use Peru as the bench mark, the same way I have done in other countries because I would like to compare models that predict Peru's social organisation more accurately. This way, I can perform comparisons with the more accurate Peru models.
+The top attributes for the cluster to predict Confidence in Press are:
+1. TNeighbourhood (~0.125)
+2. TMeet
+3. VLeisure (Negative correlation)
+4. TKnow
+5. VPolitics (~0.075)
+With an R squared value of 18.2%, and p values less than 0.05. 2 in common with Peru. Interestingly, although the cluster of countries have a higher R squared value, the coefficients are less similar to Peru compared to that of the other countries as a group.
+
+Vs Other Countries
+1. TNeighbourhood (~0.1125)
+2. VPolitics (~0.06)
+3. TMeet
+4. TPeople
+5. PTelevision
+With an R squared value of 13%, and p values < 1.0e-9.  2 in common with Peru.
+
+Vs Peru
+1. TNeighbourhood (~0.1075)
+2. SSecure
+3. VPolitics (~0.0575)
+4. STFaith
+5. STOpportunity (Negative correlation)
+With R squared = 9.5% and p value<0.07. 
+
+Next we will compare CCivilService
+For the cluster of countries:
+1. VLeisure (~-0.158)
+2. VPolitics (~0.14)
+3. TNeighbourhood (~0.114)
+4. TMeet (~0.112)
+5. TKnow (~0.0.110)
+With R squared = 19.6% and p value<0.04. With 3 attributes in common with Peru. 
+Vs Other Countries
+1. TNeighbourhood (~0.13)
+2. VPolitics (~0.094)
+3. TPeople (~0.075)
+4. VLeisure (~-0.068)
+5. PSatisfied (~-0.058)
+With R squared = 18.2% and p value<0.0002.  With 1 attribute in common.
+Vs Peru
+1. TKnow (~0.12)
+2. PTelevision (~-0.079)
+3. TMeet (0.077)
+4. VLeisure (~-0.064)
+5. STOpportunity (~-0.034)
+With R squared = 13.8% and p value<0.08.
+
+Given the comparison of 2 social organisations, it appears that using the cluster of countries give a better match of my focus country, due to overall higher R squared values across all social organisations, as well as having more common attributes compared to other countries as a group.
+
+Disclaimer, due to the wordcount of this project exceeding 2000, I will limit comparisons to only 2 of the social institutes highest confidence, using Peru's R squared values as the metric. A higher quality analysis could have been performed when comparing more social institutes, unfortunately this is one of the limitations of this project.
+
+APPENDIX.
+I used chatGPT to search for functions to plot bar graphs with, given a table of R squared, regression coefficients, p values.
+The prompt I used was: "Given a table of R squared, Regression coefficients, p values, what bar graphing function would graph coefficient size, using p value as the gradient"
+The output I got from this prompt was the following:
+library(ggplot2)
+
+ggplot(your_dataframe, aes(x = reorder(Attribute, Estimate), y = Estimate, fill = pValue)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  labs(
+    title = "Regression Coefficients by Attribute",
+    x = "Attribute",
+    y = "Coefficient",
+    fill = "p-value"
+  ) +
+  scale_fill_gradient(low = "darkblue", high = "lightgray", trans = "reverse") +
+  theme_minimal()
+I modified this and used this to plot all of my multivariable bar graph values.
+
+To calculate the euclidean distance for part 3a, I asked chatGPT:
+"Given a table with 7 columns, use the last 6 columns to calculate the euclidean distance of all rows with the first row".
+The output I got was :
+# Assume your dataframe is called 'df'
+
+# Step 1: Select only the last 6 columns
+data_matrix <- df[, (ncol(df)-5):ncol(df)]
+
+# Step 2: Convert to numeric (just in case)
+data_matrix <- data.matrix(data_matrix)
+
+# Step 3: Extract the first row as the reference
+first_row <- data_matrix[1, ]
+
+# Step 4: Compute Euclidean distances to the first row
+distances <- apply(data_matrix, 1, function(x) sqrt(sum((x - first_row)^2, na.rm = TRUE)))
+
+# Step 5: View the result
+print(distances)
+I modified this to apply to my wgi_wide data to calculate the top 5 closest countries to Peru.
+
+The table of values used for my clustering:
+Source: https://www.worldbank.org/en/publication/worldwide-governance-indicators
+```{R}
+print(wgi_wide)
+```
